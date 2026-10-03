@@ -21,6 +21,11 @@ Since mov-cli is typically installed globally via `pipx`, you can inject this pl
 pipx inject mov-cli /path/to/mov-cli-archive-plugin
 ```
 
+If mov-cli is already installed and you are using pipx
+```sh
+pipx inject mov-cli git+https://github.com/salvitch/mov-cli-internet-archive.git
+```
+
 ## Configuration
 
 Add the plugin to your `mov-cli` configuration file (usually `~/.config/mov-cli/config.toml`). 
