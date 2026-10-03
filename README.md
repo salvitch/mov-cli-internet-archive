@@ -38,7 +38,7 @@ options = { limit = 100 }
 If you want to access borrowed or restricted content, you need to authenticate. There are two ways to do this:
 
 **1. Secure Method (Recommended):**
-Do not put your credentials in the `config.toml`. Instead, use the official `internetarchive` command-line tool to securely save your login session to `~/.config/ia.ini`. Since you installed this in a `pipx` environment, you can run:
+Do not put your credentials in the `config.toml`. Instead, use the official `internetarchive` command-line tool to securely save your login session to `~/.config/ia.ini`. If you installed this in a `pipx` environment, you can run:
 ```sh
 pipx run --spec internetarchive ia configure
 ```

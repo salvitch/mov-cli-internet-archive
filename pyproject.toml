@@ -2,7 +2,7 @@
 name = "mov-cli-archive"
 description = "A mov-cli v4 plugin for Internet Archive (archive.org)."
 authors = [
-    {name = "Salvi", email = "salvar@salvitch.net"}
+    {name = "Salvich", email = "excitable-marbled96@bravealias.com"}
 ]
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.8"
@@ -39,8 +39,8 @@ dev = [
 ]
 
 [project.urls]
-GitHub = "https://github.com/mov-cli/mov-cli-archive"
-BugTracker = "https://github.com/mov-cli/mov-cli-archive/issues"
+GitHub = "https://github.com/salvitch/mov-cli-internet-archive"
+BugTracker = "https://github.com/salvitch/mov-cli-internet-archive/issues"
 
 [tool.setuptools.dynamic]
 version = { attr = "mov_cli_archive.__version__" }
