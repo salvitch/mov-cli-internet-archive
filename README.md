@@ -7,11 +7,13 @@
 
 ## Features
 - **Stream Public Content:** Watch movies, anime, and classic television directly from archive.org.
+- **Image Previews & Posters:** Automatically retrieves item poster thumbnails from Archive.org's image service (`https://archive.org/services/img/{id}`) to render previews directly in your terminal using `chafa` (or Kitty terminal `icat`).
 - **Interactive Catalog:** Run `mov-cli -s archive ""` to explore a curated list of top collections (e.g., Anime, Sci-Fi, Feature Films).
 - **Nested Searching:** After selecting a collection in the catalog, you can optionally search specifically within that collection.
 - **Direct Collection Filters:** Search collections directly from your terminal: `mov-cli -s archive "collection:anime-series haruhi"`
 - **Authentication:** Supports logging in to access restricted content.
 - **Broad Search:** Uses Archive's Lucene search backend. You can use standard text searches, exact quotes (`"phrase"`), or wildcards (`*`).
+- **Caching & Validation:** In-memory TTL caching and field-limiting queries for instant navigation and minimal network payload.
 
 ## Installation
 
@@ -36,8 +38,20 @@ archive = "mov-cli-archive"
 
 [mov-cli.scrapers.archive]
 namespace = "archive.DEFAULT"
-options = { limit = 100 }
+options = { limit = 100, fetch_images = true }
 ```
+
+### Enabling Terminal Image Previews (via fzf & chafa)
+`mov-cli` has built-in image preview support when `fzf` and `preview` are enabled. To view item poster thumbnails in your terminal alongside search results:
+
+In `~/.config/mov-cli/config.toml`:
+```toml
+[mov-cli.ui]
+fzf = true
+preview = true
+```
+
+Ensure `chafa` is installed on your system (e.g. `sudo apt install chafa`). When you search with `mov-cli`, `fzf` will display the thumbnail image for each highlighted Archive item in the preview pane.
 
 ### Authentication (Optional)
 If you want to access borrowed or restricted content, you need to authenticate. There are two ways to do this:
@@ -55,6 +69,7 @@ Alternatively, you can place them directly in your `config.toml` options (not re
 
 ### Options Explained:
 *   `limit`: The maximum number of search results to fetch. Set to `100` by default. Set to `0` for unlimited results.
+*   `fetch_images`: Set to `true` (default) to attach poster image URLs to items, or `false` to disable.
 
 ## Usage
 

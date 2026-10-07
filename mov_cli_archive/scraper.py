@@ -9,6 +9,7 @@ public video content (movies, TV shows, and anime series) with optional user aut
 
 import re
 import time
+import urllib.parse
 from threading import Lock
 from typing import TYPE_CHECKING, Optional, Dict, Generator, Any, List, Tuple
 
@@ -138,6 +139,25 @@ def _clean_year(raw_year: Any) -> Optional[str]:
     return None
 
 
+def _build_image_url(identifier: str) -> Optional[str]:
+    """Construct a direct thumbnail image URL for an Internet Archive item.
+
+    Internet Archive exposes a dynamic thumbnail service endpoint:
+    `https://archive.org/services/img/{identifier}` which automatically serves
+    the item's primary thumbnail image for preview tools like fzf and chafa.
+
+    Args:
+        identifier: Internet Archive item identifier.
+
+    Returns:
+        Standard HTTPS URL to the item's thumbnail image, or None if identifier is empty.
+    """
+    if not identifier:
+        return None
+    clean_id = urllib.parse.quote(identifier.strip(), safe="-_.")
+    return f"https://archive.org/services/img/{clean_id}"
+
+
 def _sanitize_collection_id(collection_name: str) -> str:
     """Sanitize collection identifier to prevent malformed Lucene queries.
 
@@ -225,6 +245,7 @@ class ArchiveScraper(Scraper):
         self.username: Optional[str] = opts.get("username")
         self.password: Optional[str] = opts.get("password")
         self.default_limit: Optional[int] = _validate_limit(opts.get("limit", 100), default=100)
+        self.fetch_images: bool = bool(opts.get("fetch_images", True))
 
         # Configure session authentication if credentials are provided
         if self.username and self.password:
@@ -363,11 +384,13 @@ class ArchiveScraper(Scraper):
                 item_id = raw_id.strip()
                 title = _clean_title(item.get("title"), fallback_id=item_id)
                 year = _clean_year(item.get("year"))
+                image_url = _build_image_url(item_id) if self.fetch_images else None
 
                 meta = Metadata(
                     id=item_id,
                     title=title,
                     type=MetadataType.SINGLE,
+                    image_url=image_url,
                     year=year,
                 )
 
