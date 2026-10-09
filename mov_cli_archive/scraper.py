@@ -3,9 +3,10 @@ from __future__ import annotations
 """Internet Archive (archive.org) scraper plugin for mov-cli v4.
 
 This module provides an integration with Internet Archive's media catalog,
-enabling searching, interactive collection discovery, and streaming of
-public video content (movies, TV shows, anime) and audio content (music, podcasts,
-old-time radio, audiobooks), with optional user authentication and terminal image previews.
+enabling searching, interactive collection discovery, multi-episode playlist navigation
+(e.g., animepacks, series, albums), and streaming of public video content
+(movies, TV shows, anime) and audio content (music, podcasts, old-time radio, audiobooks),
+with optional user authentication and terminal image previews.
 """
 
 import re
@@ -26,6 +27,20 @@ from mov_cli.errors import InternalPluginError
 import internetarchive
 
 __all__ = ("ArchiveScraper", )
+
+
+def _natural_sort_key(s: str) -> List[Any]:
+    """Split string into text and numeric chunks for natural human sorting.
+
+    Ensures 'episode 2' comes before 'episode 10'.
+
+    Args:
+        s: Raw file name or title string.
+
+    Returns:
+        List of alphanumeric tokens for natural sorting.
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)]
 
 
 class _TTLCache:
@@ -211,7 +226,6 @@ def _parse_media_mode_and_query(raw_query: str, default_mode: str = "video") -> 
     for prefix, mode in prefix_map:
         if q.lower().startswith(prefix):
             remainder = q[len(prefix):].strip()
-            # If remainder started with colon or space, strip again
             if remainder.startswith(":"):
                 remainder = remainder[1:].strip()
             return mode, remainder
@@ -240,10 +254,12 @@ class ArchiveScraper(Scraper):
     """mov-cli scraper for browsing, discovering, and streaming from archive.org.
 
     Supports:
-        - Multi-format streaming: Video (Movies, TV, Anime) and Audio (Music, OTR, Podcasts, Soundtracks).
+        - Multi-format streaming: Video (Movies, TV, Anime Packs) and Audio (Music, OTR, Podcasts).
+        - Multi-episode series & playlist navigation: Iterate through batch packs (e.g. animepacks)
+          or audio albums with automatic episode selection, skipping (next/previous), and track titles.
         - Targeted media selection: Search video, audio, or both simultaneously via CLI flags or config.
         - Curated interactive collection browsing across Video and Audio libraries.
-        - Direct collection filtering with search keywords (e.g., 'collection:anime-series evangelion').
+        - Direct collection filtering with search keywords (e.g., 'collection:animepacks naruto').
         - Broad Lucene full-text searches with wildcard and exclusion support.
         - Optional authenticated session integration for restricted/borrowed items.
         - Terminal image previews via fzf and chafa integration.
@@ -253,6 +269,7 @@ class ArchiveScraper(Scraper):
     # Curated video collections for interactive catalog mode
     CURATED_VIDEO_COLLECTIONS: List[Tuple[str, str]] = [
         ("Feature Films", "feature_films"),
+        ("Anime Packs (Batch Releases)", "animepacks"),
         ("Anime (General)", "anime"),
         ("Anime Series", "anime-series"),
         ("Animation & Cartoons", "animationandcartoons"),
@@ -280,6 +297,7 @@ class ArchiveScraper(Scraper):
     # Curated collections across both Video and Audio
     CURATED_COMBINED_COLLECTIONS: List[Tuple[str, str]] = [
         ("All Video & Audio (Search All)", "*all*"),
+        ("Anime Packs (Batch Releases)", "animepacks"),
         ("Feature Films (Video)", "feature_films"),
         ("Anime (General)", "anime"),
         ("Classic Television (Video)", "television"),
@@ -348,7 +366,7 @@ class ArchiveScraper(Scraper):
         super().__init__(config, http_client, options)
 
         self._search_cache = _TTLCache(ttl_seconds=300, max_size=64)
-        self._item_cache = _TTLCache(ttl_seconds=600, max_size=128)
+        self._media_files_cache = _TTLCache(ttl_seconds=600, max_size=128)
 
         # Extract and validate options
         opts = self.options or {}
@@ -373,6 +391,95 @@ class ArchiveScraper(Scraper):
                     f"Failed to authenticate with Internet Archive: {exc}"
                 ) from exc
 
+    def _resolve_playable_media_files(self, item_id: str) -> List[Any]:
+        """Fetch, filter, deduplicate, and naturally sort all playable media files in an item.
+
+        For series and pack collections (like animepacks), this isolates distinct
+        episodes or audio tracks in numerical sequence, ignoring duplicate derivative files.
+
+        Args:
+            item_id: Internet Archive item identifier.
+
+        Returns:
+            List of IA File objects sorted naturally by episode/track order.
+
+        Raises:
+            InternalPluginError: If the item does not exist or has no media.
+        """
+        cached = self._media_files_cache.get(item_id)
+        if cached is not None:
+            return cached
+
+        try:
+            item = internetarchive.get_item(item_id)
+            if not item.exists:
+                raise InternalPluginError(
+                    f"Item '{item_id}' was not found on Internet Archive (may have been deleted or made private)."
+                )
+
+            if getattr(item, "item_metadata", {}).get("is_dark", False):
+                raise InternalPluginError(
+                    f"Item '{item_id}' is restricted/dark on Internet Archive."
+                )
+
+            files = list(item.get_files())
+        except Exception as exc:
+            if isinstance(exc, InternalPluginError):
+                raise
+            raise InternalPluginError(
+                f"Failed to fetch item files from Internet Archive for '{item_id}': {exc}"
+            ) from exc
+
+        if not files:
+            raise InternalPluginError(
+                f"No files are associated with Internet Archive item '{item_id}'."
+            )
+
+        # 1. First, check if there are video files
+        video_files = [
+            f for f in files
+            if any(f.name.lower().endswith(ext) for ext in self.VIDEO_EXTENSIONS)
+        ]
+
+        if video_files:
+            # Prefer original files to avoid duplicate .ia.mp4 derivatives
+            orig_videos = [f for f in video_files if getattr(f, "source", None) == "original"]
+            if orig_videos:
+                candidates = orig_videos
+            else:
+                # Deduplicate derivatives by base name if no originals marked
+                seen_bases = set()
+                candidates = []
+                for f in video_files:
+                    base = re.sub(r"\.ia\.(mp4|mkv|webm)$", "", f.name.lower())
+                    if base not in seen_bases:
+                        seen_bases.add(base)
+                        candidates.append(f)
+        else:
+            # 2. Check for audio files
+            audio_files = [
+                f for f in files
+                if any(f.name.lower().endswith(ext) for ext in self.AUDIO_EXTENSIONS)
+            ]
+            if not audio_files:
+                return []
+
+            orig_audio = [f for f in audio_files if getattr(f, "source", None) == "original"]
+            audio_candidates = orig_audio if orig_audio else audio_files
+
+            # Deduplicate multiple audio formats (e.g. .flac and .mp3 for same track)
+            seen_bases = set()
+            candidates = []
+            for f in audio_candidates:
+                base = re.sub(r"\.(mp3|flac|ogg|wav|m4a|aac|opus)$", "", f.name.lower())
+                if base not in seen_bases:
+                    seen_bases.add(base)
+                    candidates.append(f)
+
+        sorted_files = sorted(candidates, key=lambda f: _natural_sort_key(f.name))
+        self._media_files_cache.set(item_id, sorted_files)
+        return sorted_files
+
     def search(
         self,
         query: str,
@@ -383,7 +490,7 @@ class ArchiveScraper(Scraper):
         Args:
             query: User search string, empty string for catalog mode, or query with
                 media mode prefix (e.g. 'audio:zelda', 'type:both evangelion') or
-                targeted collection filter (e.g. 'collection:oldtimeradio shadow').
+                targeted collection filter (e.g. 'collection:animepacks naruto').
             limit: Maximum number of search results to return (None uses scraper default).
 
         Yields:
@@ -496,12 +603,12 @@ class ArchiveScraper(Scraper):
                 results = internetarchive.search_items(
                     search_query,
                     sorts=["downloads desc"],
-                    fields=["identifier", "title", "year", "mediatype"],
+                    fields=["identifier", "title", "year", "mediatype", "collection"],
                 )
 
             elif clean_query.startswith("collection:"):
                 # ---------------------------------------------------------
-                # 2. Direct Collection Filter Mode (e.g. 'collection:etree grateful dead')
+                # 2. Direct Collection Filter Mode (e.g. 'collection:animepacks naruto')
                 # ---------------------------------------------------------
                 parts = clean_query.split(" ", 1)
                 raw_collection = parts[0].split("collection:", 1)[1]
@@ -518,7 +625,7 @@ class ArchiveScraper(Scraper):
                 results = internetarchive.search_items(
                     search_query,
                     sorts=["downloads desc"],
-                    fields=["identifier", "title", "year", "mediatype"],
+                    fields=["identifier", "title", "year", "mediatype", "collection"],
                 )
 
             else:
@@ -530,7 +637,7 @@ class ArchiveScraper(Scraper):
                 search_query = f"({safe_query}) AND {mediatype_filter}"
                 results = internetarchive.search_items(
                     search_query,
-                    fields=["identifier", "title", "year", "mediatype"],
+                    fields=["identifier", "title", "year", "mediatype", "collection"],
                 )
 
             count = 0
@@ -538,7 +645,6 @@ class ArchiveScraper(Scraper):
                 if actual_limit is not None and count >= actual_limit:
                     break
 
-                # Validate essential identifier
                 raw_id = item.get("identifier")
                 if not raw_id or not isinstance(raw_id, str):
                     continue
@@ -559,10 +665,13 @@ class ArchiveScraper(Scraper):
                 elif media_mode == "audio":
                     title = f"[Audio] {title}"
 
+                # Mark as MULTI so mov-cli calls scrape_episodes on selection.
+                # If scrape_episodes resolves to 1 file, it plays directly as standalone;
+                # If multiple files exist (anime packs, series, albums), it opens episode selection.
                 meta = Metadata(
                     id=item_id,
                     title=title,
-                    type=MetadataType.SINGLE,
+                    type=MetadataType.MULTI,
                     image_url=image_url,
                     year=year,
                 )
@@ -581,33 +690,41 @@ class ArchiveScraper(Scraper):
                 f"Internet Archive search failed: {exc}"
             ) from exc
 
-    def scrape_episodes(self, metadata: Metadata) -> Dict[int, int] | Dict[None, int]:
-        """Map episode availability for the selected item.
+    def scrape_episodes(self, metadata: Metadata) -> Dict[Optional[int], int]:
+        """Map available episodes or tracks for multi-file items.
 
-        Internet Archive items are treated as standalone media packages;
-        returns a single playable stream key.
+        Resolves playable video or audio files in the Archive item.
+        If the item contains multiple distinct episodes or tracks (e.g. animepacks),
+        returns `{1: episode_count}` allowing full episode navigation.
+        If only 1 file is present, returns `{None: 1}` to play immediately as a single stream.
 
         Args:
             metadata: Metadata object for the item.
 
         Returns:
-            Dictionary mapping episode structure ({None: 1}).
+            Dictionary mapping season to episode count, or `{None: 1}` for single files.
         """
-        return {None: 1}
+        if not metadata or not metadata.id:
+            return {None: 1}
+
+        try:
+            media_files = self._resolve_playable_media_files(str(metadata.id).strip())
+            total = len(media_files)
+            if total > 1:
+                return {1: total}
+            return {None: 1}
+        except Exception:
+            return {None: 1}
 
     def scrape(self, metadata: Metadata, episode: EpisodeSelector) -> Single | Multi:
         """Resolve and extract a playable video or audio stream URL from the item.
 
-        Searches the files associated with the item on Archive.org, selecting
-        the highest quality supported format:
-            1. Preferred video format (h.264, MPEG4, Matroska, WebM, etc.)
-            2. Preferred audio format (VBR MP3, MP3, FLAC, Vorbis, AAC, etc.)
-            3. Fallback video file extensions (.mp4, .mkv, .webm, .avi, etc.)
-            4. Fallback audio file extensions (.mp3, .flac, .ogg, .wav, etc.)
+        If the item has multiple files (e.g. animepacks batch or music album),
+        selects the specific episode or track corresponding to `episode.episode`.
 
         Args:
             metadata: Metadata object of the selected item.
-            episode: Episode selector (unused for standalone archive items).
+            episode: Episode selector containing the target episode number (1-indexed).
 
         Returns:
             Single: mov-cli Single stream instance with verified media URL.
@@ -620,99 +737,37 @@ class ArchiveScraper(Scraper):
             raise InternalPluginError("Invalid media selection: missing item identifier.")
 
         item_id = str(metadata.id).strip()
+        media_files = self._resolve_playable_media_files(item_id)
 
-        # Check in-memory item URL cache
-        cached_url = self._item_cache.get(item_id)
-        if cached_url:
-            return Single(
-                url=cached_url,
-                title=metadata.title,
-                year=metadata.year,
-            )
-
-        try:
-            item = internetarchive.get_item(item_id)
-            if not item.exists:
-                raise InternalPluginError(
-                    f"Item '{item_id}' was not found on Internet Archive (may have been deleted or made private)."
-                )
-
-            # Check if item is restricted or dark
-            if getattr(item, "item_metadata", {}).get("is_dark", False):
-                raise InternalPluginError(
-                    f"Item '{item_id}' is restricted/dark on Internet Archive."
-                )
-
-            files = list(item.get_files())
-        except Exception as exc:
-            if isinstance(exc, InternalPluginError):
-                raise
-            raise InternalPluginError(
-                f"Failed to fetch item files from Internet Archive for '{item_id}': {exc}"
-            ) from exc
-
-        if not files:
-            raise InternalPluginError(
-                f"No files are associated with Internet Archive item '{item_id}'."
-            )
-
-        media_url: Optional[str] = None
-
-        # 1. Preferred video formats
-        for preferred_fmt in self.PREFERRED_VIDEO_FORMATS:
-            for f in files:
-                fmt = getattr(f, "format", "") or ""
-                if fmt.lower() == preferred_fmt.lower():
-                    url = getattr(f, "url", None)
-                    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-                        media_url = url
-                        break
-            if media_url:
-                break
-
-        # 2. Preferred audio formats
-        if not media_url:
-            for preferred_fmt in self.PREFERRED_AUDIO_FORMATS:
-                for f in files:
-                    fmt = getattr(f, "format", "") or ""
-                    if fmt.lower() == preferred_fmt.lower():
-                        url = getattr(f, "url", None)
-                        if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-                            media_url = url
-                            break
-                if media_url:
-                    break
-
-        # 3. Fallback video extensions
-        if not media_url:
-            for f in files:
-                name = (getattr(f, "name", "") or "").lower()
-                if any(name.endswith(ext) for ext in self.VIDEO_EXTENSIONS):
-                    url = getattr(f, "url", None)
-                    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-                        media_url = url
-                        break
-
-        # 4. Fallback audio extensions
-        if not media_url:
-            for f in files:
-                name = (getattr(f, "name", "") or "").lower()
-                if any(name.endswith(ext) for ext in self.AUDIO_EXTENSIONS):
-                    url = getattr(f, "url", None)
-                    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-                        media_url = url
-                        break
-
-        if not media_url:
+        if not media_files:
             raise InternalPluginError(
                 f"No playable video or audio format found for '{metadata.title}' (ID: {item_id})."
             )
 
-        # Cache resolved stream URL
-        self._item_cache.set(item_id, media_url)
+        # Resolve requested episode index (1-indexed from EpisodeSelector)
+        ep_idx = 0
+        if episode and hasattr(episode, "episode") and episode.episode:
+            ep_idx = max(0, episode.episode - 1)
+
+        if ep_idx >= len(media_files):
+            ep_idx = 0
+
+        target_file = media_files[ep_idx]
+        url = getattr(target_file, "url", None)
+
+        if not url:
+            encoded_name = urllib.parse.quote(target_file.name)
+            url = f"https://archive.org/download/{item_id}/{encoded_name}"
+
+        # Clean display title with episode details if multiple files exist
+        if len(media_files) > 1:
+            clean_filename = target_file.name.rsplit("/", 1)[-1]
+            title = f"{metadata.title} [Ep {ep_idx + 1}/{len(media_files)}: {clean_filename}]"
+        else:
+            title = metadata.title
 
         return Single(
-            url=media_url,
-            title=metadata.title,
+            url=url,
+            title=title,
             year=metadata.year,
         )

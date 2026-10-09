@@ -7,11 +7,12 @@
 
 ## Features
 - **Stream Public Video & Audio:** Watch movies, anime, and classic television, or listen to music, old-time radio, podcasts, audiobooks, and live concerts directly from archive.org.
+- **Multi-Episode & Playlist Navigation:** Automatically detects multi-file items (such as `animepacks`, TV series, and music albums). Prompts you to pick an episode/track and allows sequential iteration (next/previous) during playback.
 - **Search Audio, Video, or Both:** Easily target audio (`audio:query`), video (`video:query`), or search across both simultaneously (`both:query`).
 - **Image Previews & Posters:** Automatically retrieves item poster thumbnails from Archive.org's image service (`https://archive.org/services/img/{id}`) to render previews directly in your terminal using `chafa` (or Kitty terminal `icat`).
-- **Interactive Multi-Media Catalog:** Run `mov-cli -s archive ""` to choose between Video, Audio, or Both, and browse curated collections (Anime, Feature Films, Old Time Radio, Live Music Archive, Podcasts, etc.).
+- **Interactive Multi-Media Catalog:** Run `mov-cli -s archive ""` to choose between Video, Audio, or Both, and browse curated collections (Anime Packs, Anime, Feature Films, Old Time Radio, Live Music Archive, Podcasts, etc.).
 - **Nested Searching:** After selecting a collection in the catalog, you can optionally search specifically within that collection.
-- **Direct Collection Filters:** Search collections directly from your terminal: `mov-cli -s archive "collection:anime-series haruhi"` or `mov-cli -s archive "audio:collection:oldtimeradio shadow"`
+- **Direct Collection Filters:** Search collections directly from your terminal: `mov-cli -s archive "collection:animepacks naruto"` or `mov-cli -s archive "audio:collection:oldtimeradio shadow"`
 - **Authentication:** Supports logging in to access restricted content.
 - **Broad Search:** Uses Archive's Lucene search backend. You can use standard text searches, exact quotes (`"phrase"`), or wildcards (`*`).
 - **Caching & Validation:** In-memory TTL caching and field-limiting queries for instant navigation and minimal network payload.
@@ -101,7 +102,8 @@ mov-cli -s archive ""
 
 **Search within a specific collection:**
 ```sh
-mov-cli -s archive "collection:Comedy_Films"
+mov-cli -s archive "collection:animepacks"
+mov-cli -s archive "collection:animepacks naruto"
 mov-cli -s archive "audio:collection:oldtimeradio shadow"
 ```
 
@@ -109,6 +111,13 @@ mov-cli -s archive "audio:collection:oldtimeradio shadow"
 ```sh
 mov-cli -s archive "collection:anime-series evangelion"
 ```
+
+### Multi-Episode & Playlist Navigation (e.g. `animepacks`)
+When you select an item that contains multiple episodes or audio tracks:
+1. `mov-cli` will display an episode selector: `Select Episode (Episode 1 to Episode N)`.
+2. While playing in `mpv`, `mov-cli` enables playback controls:
+   - When an episode finishes or if you stop it, `mov-cli` lets you choose **Next**, **Previous**, or **Select** another episode from the playlist.
+   - Progress is automatically remembered if continue-watching is enabled.
 
 ### Advanced Search Syntax (Lucene)
 Archive.org uses Lucene search syntax. Since this plugin searches broadly across all metadata, you can use powerful search operators:
