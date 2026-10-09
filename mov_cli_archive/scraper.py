@@ -4,7 +4,8 @@ from __future__ import annotations
 
 This module provides an integration with Internet Archive's media catalog,
 enabling searching, interactive collection discovery, and streaming of
-public video content (movies, TV shows, and anime series) with optional user authentication.
+public video content (movies, TV shows, anime) and audio content (music, podcasts,
+old-time radio, audiobooks), with optional user authentication and terminal image previews.
 """
 
 import re
@@ -172,19 +173,85 @@ def _sanitize_collection_id(collection_name: str) -> str:
     return cleaned if cleaned else "moviesandfilms"
 
 
+def _parse_media_mode_and_query(raw_query: str, default_mode: str = "video") -> Tuple[str, str]:
+    """Parse media mode flags from query string.
+
+    Supported syntax:
+        - 'audio:<query>', 'type:audio <query>', 'media:audio <query>' -> 'audio'
+        - 'video:<query>', 'type:video <query>', 'media:video <query>' -> 'video'
+        - 'both:<query>', 'type:both <query>', 'media:both <query>',
+          'all:<query>', 'type:all <query>', 'media:all <query>' -> 'both'
+
+    Args:
+        raw_query: Raw user query string.
+        default_mode: Configured default media mode ('video', 'audio', or 'both').
+
+    Returns:
+        Tuple of (resolved_media_mode, cleaned_query_without_flag).
+    """
+    q = raw_query.strip()
+    if not q:
+        return default_mode, ""
+
+    prefix_map = [
+        ("audio:", "audio"),
+        ("video:", "video"),
+        ("both:", "both"),
+        ("all:", "both"),
+        ("type:audio", "audio"),
+        ("type:video", "video"),
+        ("type:both", "both"),
+        ("type:all", "both"),
+        ("media:audio", "audio"),
+        ("media:video", "video"),
+        ("media:both", "both"),
+        ("media:all", "both"),
+    ]
+
+    for prefix, mode in prefix_map:
+        if q.lower().startswith(prefix):
+            remainder = q[len(prefix):].strip()
+            # If remainder started with colon or space, strip again
+            if remainder.startswith(":"):
+                remainder = remainder[1:].strip()
+            return mode, remainder
+
+    return default_mode, q
+
+
+def _build_mediatype_filter(mode: str) -> str:
+    """Build Archive.org Lucene mediatype filter expression.
+
+    Args:
+        mode: Media type mode ('video', 'audio', or 'both').
+
+    Returns:
+        Lucene filter expression string.
+    """
+    if mode == "audio":
+        return "(mediatype:audio OR mediatype:etree)"
+    elif mode in ("both", "all"):
+        return "(mediatype:movies OR mediatype:audio OR mediatype:etree)"
+    else:
+        return "mediatype:movies"
+
+
 class ArchiveScraper(Scraper):
     """mov-cli scraper for browsing, discovering, and streaming from archive.org.
 
     Supports:
-        - Curated interactive collection browsing (Anime, Cartoons, Sci-Fi, Classics).
+        - Multi-format streaming: Video (Movies, TV, Anime) and Audio (Music, OTR, Podcasts, Soundtracks).
+        - Targeted media selection: Search video, audio, or both simultaneously via CLI flags or config.
+        - Curated interactive collection browsing across Video and Audio libraries.
         - Direct collection filtering with search keywords (e.g., 'collection:anime-series evangelion').
         - Broad Lucene full-text searches with wildcard and exclusion support.
         - Optional authenticated session integration for restricted/borrowed items.
+        - Terminal image previews via fzf and chafa integration.
         - In-memory result caching and optimized field querying to minimize network traffic.
     """
 
-    # Top curated collections for interactive catalog mode
-    CURATED_COLLECTIONS: List[Tuple[str, str]] = [
+    # Curated video collections for interactive catalog mode
+    CURATED_VIDEO_COLLECTIONS: List[Tuple[str, str]] = [
         ("Feature Films", "feature_films"),
         ("Anime (General)", "anime"),
         ("Anime Series", "anime-series"),
@@ -198,8 +265,31 @@ class ArchiveScraper(Scraper):
         ("Film Noir", "Film_Noir"),
     ]
 
-    # Video stream format preference in descending order of compatibility
-    PREFERRED_FORMATS: Tuple[str, ...] = (
+    # Curated audio collections for interactive catalog mode
+    CURATED_AUDIO_COLLECTIONS: List[Tuple[str, str]] = [
+        ("Old Time Radio", "oldtimeradio"),
+        ("Live Concerts (Etree)", "etree"),
+        ("78 RPMs & Cylinder Recordings", "georgeblood"),
+        ("Audiobooks & Poetry", "audio_bookspoetry"),
+        ("Netlabels (Electronic Music)", "netlabels"),
+        ("Podcasts", "podcast"),
+        ("Radio Programs & Broadcasts", "radioprograms"),
+        ("Community Audio & Music", "audio_music"),
+    ]
+
+    # Curated collections across both Video and Audio
+    CURATED_COMBINED_COLLECTIONS: List[Tuple[str, str]] = [
+        ("All Video & Audio (Search All)", "*all*"),
+        ("Feature Films (Video)", "feature_films"),
+        ("Anime (General)", "anime"),
+        ("Classic Television (Video)", "television"),
+        ("Old Time Radio (Audio)", "oldtimeradio"),
+        ("Live Concerts (Audio)", "etree"),
+        ("Audiobooks & Poetry (Audio)", "audio_bookspoetry"),
+    ]
+
+    # Stream format preferences in descending order of compatibility
+    PREFERRED_VIDEO_FORMATS: Tuple[str, ...] = (
         "h.264",
         "MPEG4",
         "Matroska",
@@ -208,7 +298,17 @@ class ArchiveScraper(Scraper):
         "512Kb MPEG4",
     )
 
-    # Valid video file extension suffixes
+    PREFERRED_AUDIO_FORMATS: Tuple[str, ...] = (
+        "VBR MP3",
+        "MP3",
+        "Flac",
+        "128Kbps MP3",
+        "Ogg Vorbis",
+        "AAC",
+        "MPEG-4 Audio",
+    )
+
+    # Valid media file extensions
     VIDEO_EXTENSIONS: Tuple[str, ...] = (
         ".mp4",
         ".mkv",
@@ -219,13 +319,23 @@ class ArchiveScraper(Scraper):
         ".m4v",
     )
 
+    AUDIO_EXTENSIONS: Tuple[str, ...] = (
+        ".mp3",
+        ".flac",
+        ".ogg",
+        ".wav",
+        ".m4a",
+        ".aac",
+        ".opus",
+    )
+
     def __init__(
         self,
         config: Config,
         http_client: HTTPClient,
         options: Optional[ScraperOptionsT] = None,
     ) -> None:
-        """Initialize the Archive scraper and optional authentication.
+        """Initialize the Archive scraper, options, and authentication.
 
         Args:
             config: mov-cli configuration instance.
@@ -247,6 +357,13 @@ class ArchiveScraper(Scraper):
         self.default_limit: Optional[int] = _validate_limit(opts.get("limit", 100), default=100)
         self.fetch_images: bool = bool(opts.get("fetch_images", True))
 
+        # Default media type: 'video', 'audio', or 'both'
+        raw_media_type = str(opts.get("media_type", "video")).lower().strip()
+        if raw_media_type in ("video", "audio", "both", "all"):
+            self.default_media_type: str = "both" if raw_media_type == "all" else raw_media_type
+        else:
+            self.default_media_type = "video"
+
         # Configure session authentication if credentials are provided
         if self.username and self.password:
             try:
@@ -261,11 +378,12 @@ class ArchiveScraper(Scraper):
         query: str,
         limit: int | None = None,
     ) -> Generator[Metadata, Any, None]:
-        """Search Internet Archive for video content or launch interactive catalog.
+        """Search Internet Archive for video and audio content or open interactive catalog.
 
         Args:
-            query: User search string, empty string for catalog mode, or
-                'collection:<name> [keywords]' for targeted collection searches.
+            query: User search string, empty string for catalog mode, or query with
+                media mode prefix (e.g. 'audio:zelda', 'type:both evangelion') or
+                targeted collection filter (e.g. 'collection:oldtimeradio shadow').
             limit: Maximum number of search results to return (None uses scraper default).
 
         Yields:
@@ -277,8 +395,11 @@ class ArchiveScraper(Scraper):
         actual_limit = _validate_limit(limit, default=self.default_limit)
         clean_query = query.strip() if query else ""
 
+        # Parse media mode prefix if present (e.g. 'audio:', 'video:', 'both:', 'type:audio')
+        media_mode, clean_query = _parse_media_mode_and_query(clean_query, self.default_media_type)
+
         # Check in-memory search cache to reduce API round-trips
-        cache_key = f"{clean_query}:{actual_limit}"
+        cache_key = f"{media_mode}:{clean_query}:{actual_limit}"
         cached_results = self._search_cache.get(cache_key)
         if cached_results is not None:
             for item in cached_results:
@@ -301,24 +422,57 @@ class ArchiveScraper(Scraper):
                     ) from exc
 
                 try:
+                    # Category selection prompt
+                    category_prompt = [
+                        inquirer.List(
+                            "category",
+                            message="Archive.org Catalog - Select Media Category",
+                            choices=[
+                                ("🎬 Video & Movies", "video"),
+                                ("🎵 Audio & Music", "audio"),
+                                ("🌐 Both (Video & Audio)", "both"),
+                            ],
+                            default=self.default_media_type,
+                        )
+                    ]
+                    cat_ans = inquirer.prompt(category_prompt)
+                    if not cat_ans:
+                        return  # User aborted
+
+                    media_mode = cat_ans.get("category", "video")
+
+                    if media_mode == "audio":
+                        col_choices = self.CURATED_AUDIO_COLLECTIONS
+                    elif media_mode == "both":
+                        col_choices = self.CURATED_COMBINED_COLLECTIONS
+                    else:
+                        col_choices = self.CURATED_VIDEO_COLLECTIONS
+
                     questions = [
                         inquirer.List(
                             "collection",
-                            message="Archive.org Catalog - Select a Collection to browse",
-                            choices=self.CURATED_COLLECTIONS,
+                            message=f"Browse {media_mode.title()} Collections",
+                            choices=col_choices,
                         )
                     ]
                     answer = inquirer.prompt(questions)
                     if not answer:
-                        return  # User aborted with Escape or Ctrl+C
+                        return  # User aborted
 
-                    selected_collection = _sanitize_collection_id(answer.get("collection", ""))
+                    raw_col = answer.get("collection", "")
+
+                    if raw_col == "*all*":
+                        selected_collection = None
+                    else:
+                        selected_collection = _sanitize_collection_id(raw_col)
+
+                    col_label = selected_collection if selected_collection else "All Collections"
 
                     # Secondary interactive keyword prompt inside chosen collection
                     search_q = [
                         inquirer.Text(
                             "term",
-                            message=f"Search within '{selected_collection}' (Leave empty to list popular items)",
+                            message=f"Search within '{col_label}' (Leave empty to list popular items)",
                         )
                     ]
                     term_ans = inquirer.prompt(search_q)
@@ -327,37 +481,44 @@ class ArchiveScraper(Scraper):
                 except (KeyboardInterrupt, EOFError):
                     return  # Gracefully exit on user interrupt
 
+                mediatype_filter = _build_mediatype_filter(media_mode)
+
+                query_parts = []
                 if term:
-                    # Escape raw quotes to prevent query breakage
                     safe_term = term.replace('"', '\\"')
-                    search_query = f"({safe_term}) AND mediatype:movies AND collection:{selected_collection}"
-                else:
-                    search_query = f"mediatype:movies AND collection:{selected_collection}"
+                    query_parts.append(f"({safe_term})")
+                query_parts.append(mediatype_filter)
+                if selected_collection:
+                    query_parts.append(f"collection:{selected_collection}")
+
+                search_query = " AND ".join(query_parts)
 
                 results = internetarchive.search_items(
                     search_query,
                     sorts=["downloads desc"],
-                    fields=["identifier", "title", "year"],
+                    fields=["identifier", "title", "year", "mediatype"],
                 )
 
             elif clean_query.startswith("collection:"):
                 # ---------------------------------------------------------
-                # 2. Direct Collection Filter Mode (e.g. 'collection:anime haruhi')
+                # 2. Direct Collection Filter Mode (e.g. 'collection:etree grateful dead')
                 # ---------------------------------------------------------
                 parts = clean_query.split(" ", 1)
                 raw_collection = parts[0].split("collection:", 1)[1]
                 collection_id = _sanitize_collection_id(raw_collection)
+                mediatype_filter = _build_mediatype_filter(media_mode)
 
+                query_parts = [mediatype_filter, f"collection:{collection_id}"]
                 if len(parts) > 1 and parts[1].strip():
                     sub_keyword = parts[1].strip().replace('"', '\\"')
-                    search_query = f"({sub_keyword}) AND mediatype:movies AND collection:{collection_id}"
-                else:
-                    search_query = f"mediatype:movies AND collection:{collection_id}"
+                    query_parts.insert(0, f"({sub_keyword})")
+
+                search_query = " AND ".join(query_parts)
 
                 results = internetarchive.search_items(
                     search_query,
                     sorts=["downloads desc"],
-                    fields=["identifier", "title", "year"],
+                    fields=["identifier", "title", "year", "mediatype"],
                 )
 
             else:
@@ -365,10 +526,11 @@ class ArchiveScraper(Scraper):
                 # 3. Broad Full-Text Search
                 # ---------------------------------------------------------
                 safe_query = clean_query.replace('"', '\\"')
-                search_query = f"({safe_query}) AND mediatype:movies"
+                mediatype_filter = _build_mediatype_filter(media_mode)
+                search_query = f"({safe_query}) AND {mediatype_filter}"
                 results = internetarchive.search_items(
                     search_query,
-                    fields=["identifier", "title", "year"],
+                    fields=["identifier", "title", "year", "mediatype"],
                 )
 
             count = 0
@@ -385,6 +547,17 @@ class ArchiveScraper(Scraper):
                 title = _clean_title(item.get("title"), fallback_id=item_id)
                 year = _clean_year(item.get("year"))
                 image_url = _build_image_url(item_id) if self.fetch_images else None
+
+                item_mediatype = (item.get("mediatype") or "").lower()
+
+                # In 'both' mode, prepend media badge to title for immediate clarity
+                if media_mode in ("both", "all"):
+                    if item_mediatype in ("audio", "etree"):
+                        title = f"[Audio] {title}"
+                    else:
+                        title = f"[Video] {title}"
+                elif media_mode == "audio":
+                    title = f"[Audio] {title}"
 
                 meta = Metadata(
                     id=item_id,
@@ -411,7 +584,7 @@ class ArchiveScraper(Scraper):
     def scrape_episodes(self, metadata: Metadata) -> Dict[int, int] | Dict[None, int]:
         """Map episode availability for the selected item.
 
-        Internet Archive items are treated as standalone video packages;
+        Internet Archive items are treated as standalone media packages;
         returns a single playable stream key.
 
         Args:
@@ -423,21 +596,25 @@ class ArchiveScraper(Scraper):
         return {None: 1}
 
     def scrape(self, metadata: Metadata, episode: EpisodeSelector) -> Single | Multi:
-        """Resolve and extract a playable video stream URL from the item.
+        """Resolve and extract a playable video or audio stream URL from the item.
 
         Searches the files associated with the item on Archive.org, selecting
-        the highest quality supported format (h.264, MPEG4, Matroska, etc.).
+        the highest quality supported format:
+            1. Preferred video format (h.264, MPEG4, Matroska, WebM, etc.)
+            2. Preferred audio format (VBR MP3, MP3, FLAC, Vorbis, AAC, etc.)
+            3. Fallback video file extensions (.mp4, .mkv, .webm, .avi, etc.)
+            4. Fallback audio file extensions (.mp3, .flac, .ogg, .wav, etc.)
 
         Args:
             metadata: Metadata object of the selected item.
             episode: Episode selector (unused for standalone archive items).
 
         Returns:
-            Single: mov-cli Single stream instance with verified video URL.
+            Single: mov-cli Single stream instance with verified media URL.
 
         Raises:
             InternalPluginError: If item files cannot be retrieved, item is unavailable,
-                or no valid video stream is found.
+                or no valid video/audio stream is found.
         """
         if not metadata or not metadata.id:
             raise InternalPluginError("Invalid media selection: missing item identifier.")
@@ -479,40 +656,63 @@ class ArchiveScraper(Scraper):
                 f"No files are associated with Internet Archive item '{item_id}'."
             )
 
-        video_url: Optional[str] = None
+        media_url: Optional[str] = None
 
-        # 1. First pass: Search for preferred formats in defined priority order
-        for preferred_fmt in self.PREFERRED_FORMATS:
+        # 1. Preferred video formats
+        for preferred_fmt in self.PREFERRED_VIDEO_FORMATS:
             for f in files:
                 fmt = getattr(f, "format", "") or ""
                 if fmt.lower() == preferred_fmt.lower():
                     url = getattr(f, "url", None)
                     if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-                        video_url = url
+                        media_url = url
                         break
-            if video_url:
+            if media_url:
                 break
 
-        # 2. Fallback pass: Check by common video file extensions
-        if not video_url:
+        # 2. Preferred audio formats
+        if not media_url:
+            for preferred_fmt in self.PREFERRED_AUDIO_FORMATS:
+                for f in files:
+                    fmt = getattr(f, "format", "") or ""
+                    if fmt.lower() == preferred_fmt.lower():
+                        url = getattr(f, "url", None)
+                        if url and isinstance(url, str) and url.startswith(("http://", "https://")):
+                            media_url = url
+                            break
+                if media_url:
+                    break
+
+        # 3. Fallback video extensions
+        if not media_url:
             for f in files:
                 name = (getattr(f, "name", "") or "").lower()
                 if any(name.endswith(ext) for ext in self.VIDEO_EXTENSIONS):
                     url = getattr(f, "url", None)
                     if url and isinstance(url, str) and url.startswith(("http://", "https://")):
-                        video_url = url
+                        media_url = url
                         break
 
-        if not video_url:
+        # 4. Fallback audio extensions
+        if not media_url:
+            for f in files:
+                name = (getattr(f, "name", "") or "").lower()
+                if any(name.endswith(ext) for ext in self.AUDIO_EXTENSIONS):
+                    url = getattr(f, "url", None)
+                    if url and isinstance(url, str) and url.startswith(("http://", "https://")):
+                        media_url = url
+                        break
+
+        if not media_url:
             raise InternalPluginError(
-                f"No playable video format found for '{metadata.title}' (ID: {item_id})."
+                f"No playable video or audio format found for '{metadata.title}' (ID: {item_id})."
             )
 
-        # Cache resolved video stream URL
-        self._item_cache.set(item_id, video_url)
+        # Cache resolved stream URL
+        self._item_cache.set(item_id, media_url)
 
         return Single(
-            url=video_url,
+            url=media_url,
             title=metadata.title,
             year=metadata.year,
         )

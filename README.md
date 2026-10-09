@@ -6,11 +6,12 @@
 </div>
 
 ## Features
-- **Stream Public Content:** Watch movies, anime, and classic television directly from archive.org.
+- **Stream Public Video & Audio:** Watch movies, anime, and classic television, or listen to music, old-time radio, podcasts, audiobooks, and live concerts directly from archive.org.
+- **Search Audio, Video, or Both:** Easily target audio (`audio:query`), video (`video:query`), or search across both simultaneously (`both:query`).
 - **Image Previews & Posters:** Automatically retrieves item poster thumbnails from Archive.org's image service (`https://archive.org/services/img/{id}`) to render previews directly in your terminal using `chafa` (or Kitty terminal `icat`).
-- **Interactive Catalog:** Run `mov-cli -s archive ""` to explore a curated list of top collections (e.g., Anime, Sci-Fi, Feature Films).
+- **Interactive Multi-Media Catalog:** Run `mov-cli -s archive ""` to choose between Video, Audio, or Both, and browse curated collections (Anime, Feature Films, Old Time Radio, Live Music Archive, Podcasts, etc.).
 - **Nested Searching:** After selecting a collection in the catalog, you can optionally search specifically within that collection.
-- **Direct Collection Filters:** Search collections directly from your terminal: `mov-cli -s archive "collection:anime-series haruhi"`
+- **Direct Collection Filters:** Search collections directly from your terminal: `mov-cli -s archive "collection:anime-series haruhi"` or `mov-cli -s archive "audio:collection:oldtimeradio shadow"`
 - **Authentication:** Supports logging in to access restricted content.
 - **Broad Search:** Uses Archive's Lucene search backend. You can use standard text searches, exact quotes (`"phrase"`), or wildcards (`*`).
 - **Caching & Validation:** In-memory TTL caching and field-limiting queries for instant navigation and minimal network payload.
@@ -38,7 +39,7 @@ archive = "mov-cli-archive"
 
 [mov-cli.scrapers.archive]
 namespace = "archive.DEFAULT"
-options = { limit = 100, fetch_images = true }
+options = { limit = 100, fetch_images = true, media_type = "video" }
 ```
 
 ### Enabling Terminal Image Previews (via fzf & chafa)
@@ -70,15 +71,30 @@ Alternatively, you can place them directly in your `config.toml` options (not re
 ### Options Explained:
 *   `limit`: The maximum number of search results to fetch. Set to `100` by default. Set to `0` for unlimited results.
 *   `fetch_images`: Set to `true` (default) to attach poster image URLs to items, or `false` to disable.
+*   `media_type`: Default search target (`"video"`, `"audio"`, or `"both"`). Defaults to `"video"`.
 
 ## Usage
 
-**Search globally:**
+**Search Videos (Default):**
 ```sh
 mov-cli -s archive "matrix"
 ```
 
-**Open the interactive catalog:**
+**Search Audio (Music, OTR, Podcasts, Soundtracks):**
+```sh
+mov-cli -s archive "audio:zelda"
+# or
+mov-cli -s archive "type:audio beethoven"
+```
+
+**Search Both Video and Audio Simultaneously:**
+```sh
+mov-cli -s archive "both:evangelion"
+# or
+mov-cli -s archive "type:both final fantasy"
+```
+
+**Open the interactive catalog (select between Video, Audio, or Both):**
 ```sh
 mov-cli -s archive ""
 ```
@@ -86,6 +102,7 @@ mov-cli -s archive ""
 **Search within a specific collection:**
 ```sh
 mov-cli -s archive "collection:Comedy_Films"
+mov-cli -s archive "audio:collection:oldtimeradio shadow"
 ```
 
 **Search for a keyword within a specific collection:**
