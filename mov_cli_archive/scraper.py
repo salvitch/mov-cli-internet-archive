@@ -250,6 +250,51 @@ def _build_mediatype_filter(mode: str) -> str:
         return "mediatype:movies"
 
 
+NON_MEDIA_FORMATS: Tuple[str, ...] = (
+    "archive bittorrent",
+    "metadata",
+    "item tile",
+    "thumbnail",
+    "spectrogram",
+    "text",
+    "html",
+    "xml",
+    "sqlite",
+    "checksums",
+    "rar",
+    "zip",
+    "7z",
+    "tar",
+    "iso",
+    "graphic",
+    "single page processed jp2 zip",
+    "abyssoft installer",
+    "windows executable",
+)
+
+
+def _has_potential_media(raw_formats: Any) -> bool:
+    """Check if an item's format list contains at least one playable media format.
+
+    Filters out items that only consist of compressed archive dumps (.rar, .zip),
+    metadata files, or raw HTML pages.
+
+    Args:
+        raw_formats: Formats attribute from Internet Archive search result.
+
+    Returns:
+        False if all formats are confirmed non-media archives; True otherwise.
+    """
+    if not raw_formats:
+        return True
+    if isinstance(raw_formats, str):
+        formats = [raw_formats]
+    else:
+        formats = list(raw_formats)
+
+    return any(f.strip().lower() not in NON_MEDIA_FORMATS for f in formats)
+
+
 class ArchiveScraper(Scraper):
     """mov-cli scraper for browsing, discovering, and streaming from archive.org.
 
@@ -321,9 +366,11 @@ class ArchiveScraper(Scraper):
         "MP3",
         "Flac",
         "128Kbps MP3",
+        "Advanced Audio Coding",
         "Ogg Vorbis",
         "AAC",
         "MPEG-4 Audio",
+        "Waveform Audio",
     )
 
     # Valid media file extensions
@@ -345,6 +392,9 @@ class ArchiveScraper(Scraper):
         ".m4a",
         ".aac",
         ".opus",
+        ".wma",
+        ".aiff",
+        ".alac",
     )
 
     def __init__(
@@ -455,14 +505,32 @@ class ArchiveScraper(Scraper):
                     if base not in seen_bases:
                         seen_bases.add(base)
                         candidates.append(f)
-        else:
+        if not video_files:
             # 2. Check for audio files
             audio_files = [
                 f for f in files
                 if any(f.name.lower().endswith(ext) for ext in self.AUDIO_EXTENSIONS)
             ]
             if not audio_files:
-                return []
+                # Neither video nor audio files exist. Inspect file types to report clear error
+                archive_exts = (".rar", ".zip", ".7z", ".tar", ".gz", ".iso")
+                archive_files = [f.name for f in files if any(f.name.lower().endswith(ext) for ext in archive_exts)]
+                html_files = [f.name for f in files if f.name.lower().endswith((".html", ".htm"))]
+
+                if archive_files:
+                    raise InternalPluginError(
+                        f"Item '{item_id}' only contains compressed archive files ({', '.join(archive_files[:2])}) "
+                        "which cannot be directly streamed. Unpackable media is required."
+                    )
+                elif html_files:
+                    raise InternalPluginError(
+                        f"Item '{item_id}' is a web page archive (.html) with no playable audio or video streams."
+                    )
+                else:
+                    file_names = [f.name for f in files[:3]]
+                    raise InternalPluginError(
+                        f"No streamable video or audio files found in '{item_id}' (contains: {', '.join(file_names)})."
+                    )
 
             orig_audio = [f for f in audio_files if getattr(f, "source", None) == "original"]
             audio_candidates = orig_audio if orig_audio else audio_files
@@ -471,7 +539,7 @@ class ArchiveScraper(Scraper):
             seen_bases = set()
             candidates = []
             for f in audio_candidates:
-                base = re.sub(r"\.(mp3|flac|ogg|wav|m4a|aac|opus)$", "", f.name.lower())
+                base = re.sub(r"\.(mp3|flac|ogg|wav|m4a|aac|opus|wma|aiff|alac)$", "", f.name.lower())
                 if base not in seen_bases:
                     seen_bases.add(base)
                     candidates.append(f)
@@ -603,7 +671,7 @@ class ArchiveScraper(Scraper):
                 results = internetarchive.search_items(
                     search_query,
                     sorts=["downloads desc"],
-                    fields=["identifier", "title", "year", "mediatype", "collection"],
+                    fields=["identifier", "title", "year", "mediatype", "collection", "format"],
                 )
 
             elif clean_query.startswith("collection:"):
@@ -625,7 +693,7 @@ class ArchiveScraper(Scraper):
                 results = internetarchive.search_items(
                     search_query,
                     sorts=["downloads desc"],
-                    fields=["identifier", "title", "year", "mediatype", "collection"],
+                    fields=["identifier", "title", "year", "mediatype", "collection", "format"],
                 )
 
             else:
@@ -637,13 +705,18 @@ class ArchiveScraper(Scraper):
                 search_query = f"({safe_query}) AND {mediatype_filter}"
                 results = internetarchive.search_items(
                     search_query,
-                    fields=["identifier", "title", "year", "mediatype", "collection"],
+                    fields=["identifier", "title", "year", "mediatype", "collection", "format"],
                 )
 
             count = 0
             for item in results:
                 if actual_limit is not None and count >= actual_limit:
                     break
+
+                # Filter out items that only contain compressed archive packages (.rar, .zip) or web pages
+                raw_formats = item.get("format")
+                if raw_formats and not _has_potential_media(raw_formats):
+                    continue
 
                 raw_id = item.get("identifier")
                 if not raw_id or not isinstance(raw_id, str):
