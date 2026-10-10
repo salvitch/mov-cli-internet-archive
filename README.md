@@ -73,6 +73,10 @@ Alternatively, you can place them directly in your `config.toml` options (not re
 *   `limit`: The maximum number of search results to fetch. Set to `100` by default. Set to `0` for unlimited results.
 *   `fetch_images`: Set to `true` (default) to attach poster image URLs to items, or `false` to disable.
 *   `media_type`: Default search target (`"video"`, `"audio"`, or `"both"`). Defaults to `"video"`.
+*   `cache_enabled`: Set to `true` (default) to persist search and item metadata to local disk cache (`~/.cache/mov-cli-archive`), avoiding redundant network traffic.
+*   `search_cache_ttl`: Expiration time in seconds for cached search queries (default: `3600` / 1 hour).
+*   `item_cache_ttl`: Expiration time in seconds for cached item file lists (default: `21600` / 6 hours).
+*   `max_workers`: Number of concurrent worker threads for file processing and pre-verification (default: `8`).
 
 ## Usage
 
